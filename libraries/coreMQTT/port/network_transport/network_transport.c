@@ -11,6 +11,12 @@
 
 #define TAG "network_transport"
 
+/* 日志级别优化说明：
+ * - 将“连接尝试/连接成功/正常断开”的 ESP_LOGE 降级为 ESP_LOGI 或 ESP_LOGW，
+ *   以避免断网重连等正常流程产生大量红色错误日志。
+ * - 保留真正异常（如 esp_tls_init 失败、destroy 失败、IO 错误）的 ESP_LOGE 等级。
+ * Source: 用户关于“优化日志输出/避免红色刷屏”的需求（KISS/YAGNI）。 */
+
 Timeouts_t timeouts = { .connectionTimeoutMs = 4000, .sendTimeoutMs = 10000, .recvTimeoutMs = 2000 };
 
 void vTlsSetConnectTimeout( uint16_t connectionTimeoutMs )
@@ -55,6 +61,8 @@ TlsTransportStatus_t xTlsConnect( NetworkContext_t* pxNetworkContext )
         if( pxTls != NULL )
         {
             pxNetworkContext->pxTls = pxTls;
+            ESP_LOGI(TAG, "TLS connect: attempting connection to %s:%d (pxTls=%p)",
+                     pxNetworkContext->pcHostname, pxNetworkContext->xPort, pxTls);
 
             lConnectResult = esp_tls_conn_new_sync( pxNetworkContext->pcHostname,
                 strlen( pxNetworkContext->pcHostname ),
@@ -70,6 +78,7 @@ TlsTransportStatus_t xTlsConnect( NetworkContext_t* pxNetworkContext )
 
                     if( fcntl( lSockFd, F_SETFL, flags | O_NONBLOCK ) != -1 )
                     {
+                        ESP_LOGI(TAG, "TLS connect: successfully established connection");
                         xResult = TLS_TRANSPORT_SUCCESS;
                     }
                 }
@@ -77,11 +86,14 @@ TlsTransportStatus_t xTlsConnect( NetworkContext_t* pxNetworkContext )
 
             if( xResult != TLS_TRANSPORT_SUCCESS )
             {
+                ESP_LOGW(TAG, "TLS connect: connection failed, cleaning up (pxTls=%p)", pxTls);
                 esp_tls_conn_destroy( pxNetworkContext->pxTls );
                 pxNetworkContext->pxTls = NULL;
-            } else 
-            {
             }
+        }
+        else
+        {
+            ESP_LOGE(TAG, "TLS connect: esp_tls_init failed");
         }
         ( void ) xSemaphoreGive( pxNetworkContext->xTlsContextSemaphore );
     }
@@ -97,21 +109,33 @@ TlsTransportStatus_t xTlsDisconnect( NetworkContext_t* pxNetworkContext )
     {
         if( pxNetworkContext->pxTls == NULL )
         {
-            xResult = TLS_TRANSPORT_SUCCESS;
-        }
-        else if( esp_tls_conn_destroy(pxNetworkContext->pxTls ) == 0)
-        {
+            ESP_LOGD(TAG, "TLS disconnect: pxTls already NULL, no action needed");
             xResult = TLS_TRANSPORT_SUCCESS;
         }
         else
         {
-            xResult = TLS_TRANSPORT_DISCONNECT_FAILURE;
+            ESP_LOGI(TAG, "TLS disconnect: destroying TLS connection (pxTls=%p)", pxNetworkContext->pxTls);
+            if( esp_tls_conn_destroy( pxNetworkContext->pxTls ) == 0 )
+            {
+                /* Reset the TLS handle so follow-up disconnect calls do not attempt
+                 * to free the same context twice. */
+                pxNetworkContext->pxTls = NULL;
+                ESP_LOGI(TAG, "TLS disconnect: successfully destroyed and set pxTls to NULL");
+                xResult = TLS_TRANSPORT_SUCCESS;
+            }
+            else
+            {
+                ESP_LOGE(TAG, "TLS disconnect: esp_tls_conn_destroy failed, but setting pxTls to NULL anyway");
+                pxNetworkContext->pxTls = NULL; // Set to NULL even on failure to prevent double free
+                xResult = TLS_TRANSPORT_DISCONNECT_FAILURE;
+            }
         }
 
         ( void ) xSemaphoreGive( pxNetworkContext->xTlsContextSemaphore );
     }
     else
     {
+        ESP_LOGE(TAG, "TLS disconnect: failed to take semaphore");
         xResult = TLS_TRANSPORT_DISCONNECT_FAILURE;
     }
 
@@ -256,6 +280,7 @@ int32_t espTlsTransportRecv( NetworkContext_t* pxNetworkContext,
                 else if( lResult == 0 )
                 {
                     ESP_LOGE( TAG, "Connection closed" );
+                    //esp_restart();
                     lBytesRead = -1;
                 }
                 else

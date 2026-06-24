@@ -1,7 +1,9 @@
-/* Wait only a short interval each iteration for faster
- * processing of incoming data. */
-#define MQTT_AGENT_MAX_EVENT_QUEUE_WAIT_TIME       ( 10U )
+#ifndef CORE_MQTT_AGENT_CONFIG_H
+#define CORE_MQTT_AGENT_CONFIG_H
 
-/* We will be downloading the OTA image one block at a time.
- * Limit the number of outstanding ACK we need. */
-#define MQTT_AGENT_MAX_OUTSTANDING_ACKS            ( 10U )
+#include "sdkconfig.h"
+
+#define MQTT_AGENT_MAX_EVENT_QUEUE_WAIT_TIME       ( CONFIG_MQTT_AGENT_MAX_EVENT_QUEUE_WAIT_TIME )
+#define MQTT_AGENT_MAX_OUTSTANDING_ACKS            ( CONFIG_MQTT_AGENT_MAX_OUTSTANDING_ACKS )
+
+#endif /* CORE_MQTT_AGENT_CONFIG_H */

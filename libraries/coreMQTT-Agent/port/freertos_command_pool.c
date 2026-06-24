@@ -23,6 +23,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+/* ESP-IDF heap capabilities for PSRAM allocation. */
+#include "esp_attr.h"
+
 /* Header include. */
 #include "freertos_command_pool.h"
 #include "freertos_agent_message.h"
@@ -32,14 +35,15 @@
 #define QUEUE_NOT_INITIALIZED    ( 0U )
 #define QUEUE_INITIALIZED        ( 1U )
 
-#define MQTT_COMMAND_CONTEXTS_POOL_SIZE     ( 10 )
+/* Increased to handle high concurrent commands from main MQTT agent and log MQTT agent during OTA */
+#define MQTT_COMMAND_CONTEXTS_POOL_SIZE     ( 256 )
 
 /**
  * @brief The pool of command structures used to hold information on commands (such
  * as PUBLISH or SUBSCRIBE) between the command being created by an API call and
  * completion of the command by the execution of the command's callback.
  */
-static MQTTAgentCommand_t commandStructurePool[ MQTT_COMMAND_CONTEXTS_POOL_SIZE ];
+EXT_RAM_BSS_ATTR static MQTTAgentCommand_t commandStructurePool[ MQTT_COMMAND_CONTEXTS_POOL_SIZE ];
 
 /**
  * @brief The message context used to guard the pool of MQTTAgentCommand_t structures.
@@ -60,8 +64,8 @@ void Agent_InitializePool( void )
 {
     size_t i;
     MQTTAgentCommand_t * pCommand;
-    static uint8_t staticQueueStorageArea[ MQTT_COMMAND_CONTEXTS_POOL_SIZE * sizeof( MQTTAgentCommand_t * ) ];
-    static StaticQueue_t staticQueueStructure;
+    EXT_RAM_BSS_ATTR static uint8_t staticQueueStorageArea[ MQTT_COMMAND_CONTEXTS_POOL_SIZE * sizeof( MQTTAgentCommand_t * ) ];
+    EXT_RAM_BSS_ATTR static StaticQueue_t staticQueueStructure;
     bool commandAdded = false;
 
     if( initStatus == QUEUE_NOT_INITIALIZED )
