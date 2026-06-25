@@ -30,5 +30,4 @@
 	url = https://github.com/aws/Fleet-Provisioning-for-AWS-IoT-embedded-sdk
 [submodule "libraries/aws-iot-core-mqtt-file-streams-embedded-c/aws-iot-core-mqtt-file-streams-embedded-c"]
 	path = libraries/aws-iot-core-mqtt-file-streams-embedded-c/aws-iot-core-mqtt-file-streams-embedded-c
-	url = https://github.com/GASEN1216/aws-iot-core-mqtt-file-streams-embedded-c.git
-	branch = hyplink-c5
+	url = https://github.com/aws/aws-iot-core-mqtt-file-streams-embedded-c
