@@ -35,7 +35,7 @@ set(AWS_OTA_REQUIRES
     efuse
     log
     app_update
-    espressif__cbor
+    cbor
 )
 
 idf_component_register(
