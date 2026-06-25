@@ -35,9 +35,9 @@
 #include "hal/wdt_hal.h"
 #include "esp_partition.h"
 
-#if !CONFIG_IDF_TARGET_ESP32C6 && !CONFIG_IDF_TARGET_ESP32H2
-#include "soc/rtc_cntl_reg.h"
-#else
+/* ESP-IDF 5.x 移除了 rtc_cntl_reg.h，使用 wdt_hal.h 替代 */
+/* 对于 ESP32-S3 和其他芯片，不再需要直接包含这些底层寄存器头文件 */
+#if CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32H2
 #include "soc/lp_wdt_reg.h"
 #include "soc/lp_timer_reg.h"
 #include "soc/lp_analog_peri_reg.h"
