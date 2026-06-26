@@ -31,17 +31,13 @@
 #include "iot_crypto.h"
 #include "core_pkcs11.h"
 #include "esp_system.h"
+#include "esp_idf_version.h"
 #include "esp_log.h"
 #include "hal/wdt_hal.h"
 #include "esp_partition.h"
 
-#if !CONFIG_IDF_TARGET_ESP32C6 && !CONFIG_IDF_TARGET_ESP32H2
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL( 5, 1, 0 )
 #include "soc/rtc_cntl_reg.h"
-#else
-#include "soc/lp_wdt_reg.h"
-#include "soc/lp_timer_reg.h"
-#include "soc/lp_analog_peri_reg.h"
-#include "soc/pmu_reg.h"
 #endif
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL( 5, 0, 0 )
