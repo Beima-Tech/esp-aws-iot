@@ -36,6 +36,7 @@ set(AWS_OTA_REQUIRES
     log
     app_update
     cbor
+    ppp_service_bridge
 )
 
 idf_component_register(

@@ -35,6 +35,7 @@
 #include "esp_log.h"
 #include "hal/wdt_hal.h"
 #include "esp_partition.h"
+#include "ppp_service_bridge.h"
 
 #if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL( 5, 1, 0 )
 #include "soc/rtc_cntl_reg.h"
@@ -555,6 +556,35 @@ OtaPalStatus_t otaPal_CloseFile( AfrOtaJobDocumentFields_t * const pFileContext 
 OtaPalStatus_t IRAM_ATTR otaPal_ResetDevice( AfrOtaJobDocumentFields_t * const pFileContext )
 {
     ( void ) pFileContext;
+
+    /* Gracefully shut down 4G/PPP before OTA restart.
+     * If the modem is left in PPP DATA mode when esp_restart() fires, the next
+     * firmware image may lose AT access until the modem is explicitly recovered.
+     * Use the shared bridge so this OTA component does not depend on `main`. */
+    if( ppp_service_bridge_is_available() )
+    {
+        /* Attempt shutdown unconditionally when the bridge is present.
+         * The PPP "active" probe can transiently fail under state-lock contention,
+         * which would otherwise skip the only graceful modem cleanup before reboot. */
+        ESP_LOGI( TAG, "OTA restart: shutting down 4G/PPP to restore modem command mode" );
+        esp_err_t ppp_err = ppp_service_bridge_deinit( "OTA firmware activation restart" );
+        if( ppp_err == ESP_OK )
+        {
+            ESP_LOGI( TAG, "OTA restart: 4G/PPP shutdown completed before reboot" );
+            vTaskDelay( OTA_HALF_SECOND_DELAY );
+        }
+        else
+        {
+            ESP_LOGW( TAG,
+                      "OTA restart: 4G/PPP shutdown returned %s; continuing with startup self-heal fallback",
+                      esp_err_to_name( ppp_err ) );
+            vTaskDelay( pdMS_TO_TICKS( 2000UL ) );
+        }
+    }
+    else
+    {
+        ESP_LOGW( TAG, "OTA restart: PPP bridge unavailable, relying on modem startup self-heal only" );
+    }
 
     /* Short delay for debug log output before reset. */
     vTaskDelay( OTA_HALF_SECOND_DELAY );
