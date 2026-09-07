@@ -497,6 +497,24 @@ OtaPalStatus_t otaPal_CloseFile( AfrOtaJobDocumentFields_t * const pFileContext 
         return OtaPalFileClose;
     }
 
+    /* F-OTA-016: closing an already-closed file must be a no-op, not a second
+     * verification.
+     *
+     * The first successful close appends the 80-byte ECDSA trailer for the
+     * bootloader and adds it to data_write_len. otaPal_CheckFileSignature()
+     * hashes exactly data_write_len bytes, so a second call verifies
+     * "image + trailer" against the signature of the image alone - it cannot
+     * pass, and its failure branch erases the update partition that holds the
+     * image that just verified correctly. The agent side (F-OTA-016 in
+     * ota_task.c) now delivers one CloseFile per download; this is the same
+     * rule enforced where the damage was done, so any future caller is safe
+     * too. */
+    if( ota_ctx.valid_image == true )
+    {
+        LogWarn( ( "CloseFile ignored: this image is already closed and verified" ) );
+        return OtaPalSuccess;
+    }
+
     if( pFileContext->signature == NULL )
     {
         LogError( ( "Image Signature not found" ) );
