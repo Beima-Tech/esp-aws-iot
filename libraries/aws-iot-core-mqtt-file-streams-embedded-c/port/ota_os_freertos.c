@@ -40,8 +40,24 @@
 #define MAX_MESSAGES    20
 #define MAX_MSG_SIZE    sizeof( OtaEventMsg_t )
 
-/* Array containing pointer to the OTA event structures used to send events to the OTA task. */
-static OtaEventMsg_t queueData[ MAX_MESSAGES * MAX_MSG_SIZE ];
+/* Backing store for the static queue: MAX_MESSAGES elements, not MAX_MESSAGES
+ * *bytes*' worth of them.
+ *
+ * F-OTA-019: this array is typed OtaEventMsg_t, so multiplying by MAX_MSG_SIZE
+ * (which is sizeof( OtaEventMsg_t )) sized it in units of the element size a
+ * second time - 20 * 12 = 240 elements, 2,880 bytes, for a queue that can only
+ * ever hold 20 of them. xQueueCreateStatic() below asks for
+ * MAX_MESSAGES * MAX_MSG_SIZE *bytes*, which this declaration provides exactly,
+ * and the extra 2,640 bytes sat unused in internal BSS for the life of the
+ * image. Internal RAM is the scarce pool on this gateway. */
+static OtaEventMsg_t queueData[ MAX_MESSAGES ];
+
+/* The storage area is the one thing xQueueCreateStatic() cannot check for
+ * itself: too small and it writes past the array. State the requirement here so
+ * a future edit to either MAX_MESSAGES or the element type fails the build
+ * instead of the field. */
+_Static_assert( sizeof( queueData ) >= ( MAX_MESSAGES * MAX_MSG_SIZE ),
+                "OTA event queue storage is smaller than the queue it backs" );
 
 /* The queue control structure.  .*/
 static StaticQueue_t staticQueue;
