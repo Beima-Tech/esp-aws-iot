@@ -76,6 +76,11 @@ typedef struct
     const esp_partition_t * update_partition;
     const AfrOtaJobDocumentFields_t * cur_ota;
     esp_ota_handle_t update_handle;
+    /* F-OTA-018: whether update_handle currently names a live esp_ota_begin()
+     * allocation. esp_ota_handle_t is an opaque integer, so there is no "null"
+     * value to test - without this flag the only way to know was to assume, and
+     * the abort path assumed wrong. */
+    bool update_handle_valid;
     uint32_t data_write_len;
     bool valid_image;
 } esp_ota_context_t;
@@ -159,10 +164,38 @@ cleanup:
     }
 }
 
+/* F-OTA-018: give the ESP-IDF OTA handle back before losing the only reference
+ * to it.
+ *
+ * esp_ota_begin() allocates an ota_ops_entry_t and links it into a global list;
+ * only esp_ota_end() or esp_ota_abort() unlink and free it. esp_ota_end()
+ * validates and finalises the image, which is wrong for a transfer that is
+ * being given up, so abort is the right verb here: it frees the entry and
+ * touches no flash.
+ *
+ * Idempotent, so every teardown path can call it without first working out
+ * whether some other path already did. */
+static void _esp_ota_ctx_release_handle( esp_ota_context_t * ctx )
+{
+    if( ( ctx != NULL ) && ( ctx->update_handle_valid ) )
+    {
+        ctx->update_handle_valid = false;
+
+        if( esp_ota_abort( ctx->update_handle ) != ESP_OK )
+        {
+            LogWarn( ( "esp_ota_abort() did not recognise the OTA handle" ) );
+        }
+    }
+}
+
 static void _esp_ota_ctx_clear( esp_ota_context_t * ota_ctx )
 {
     if( ota_ctx != NULL )
     {
+        /* Clearing the context is the last reference to update_handle, so the
+         * SDK allocation has to go back first - otherwise every abort/retry
+         * cycle leaked one entry until the next reboot. */
+        _esp_ota_ctx_release_handle( ota_ctx );
         memset( ota_ctx, 0, sizeof( esp_ota_context_t ) );
     }
 }
@@ -190,6 +223,11 @@ OtaPalStatus_t otaPal_Abort( AfrOtaJobDocumentFields_t * const pFileContext )
 
     if( _esp_ota_ctx_validate( pFileContext ) )
     {
+        /* F-OTA-018: _esp_ota_ctx_close() detaches the PAL's view of the
+         * transfer but leaves update_handle behind, and nothing else ever looks
+         * at it again - only otaPal_ActivateNewImage() calls esp_ota_end(), and
+         * an aborted job never gets there. Release it here. */
+        _esp_ota_ctx_release_handle( &ota_ctx );
         _esp_ota_ctx_close( pFileContext );
         ota_ret = OtaPalSuccess;
     }
@@ -240,6 +278,7 @@ OtaPalStatus_t otaPal_CreateFileForRx( AfrOtaJobDocumentFields_t * const pFileCo
     ota_ctx.cur_ota = pFileContext;
     ota_ctx.update_partition = update_partition;
     ota_ctx.update_handle = update_handle;
+    ota_ctx.update_handle_valid = true;   /* F-OTA-018 */
 
     ota_ctx.data_write_len = 0;
     ota_ctx.valid_image = false;
@@ -616,7 +655,16 @@ OtaPalStatus_t otaPal_ActivateNewImage( AfrOtaJobDocumentFields_t * const pFileC
 
     if( ota_ctx.cur_ota != NULL )
     {
-        if( esp_ota_end( ota_ctx.update_handle ) != ESP_OK )
+        /* F-OTA-018: esp_ota_end() unlinks and frees the entry on every path
+         * once it recognises the handle - success, validation failure and the
+         * "nothing was written" rejection alike - so the handle is spent from
+         * here on. Mark it before the branches below, both of which end in
+         * _esp_ota_ctx_clear() and would otherwise abort an already-freed
+         * handle. */
+        bool handle_was_valid = ota_ctx.update_handle_valid;
+        ota_ctx.update_handle_valid = false;
+
+        if( handle_was_valid && ( esp_ota_end( ota_ctx.update_handle ) != ESP_OK ) )
         {
             LogError( ( "esp_ota_end failed!" ) );
             esp_partition_erase_range( ota_ctx.update_partition, 0, ota_ctx.update_partition->size );
