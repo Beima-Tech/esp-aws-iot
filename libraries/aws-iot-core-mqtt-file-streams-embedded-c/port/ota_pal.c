@@ -295,12 +295,30 @@ OtaPalStatus_t otaPal_CreateFileForRx( AfrOtaJobDocumentFields_t * const pFileCo
         return OtaPalRxFileCreateFailed;
     }
 
-    if( otaPal_SetPlatformImageState( pFileContext, OtaImageStateAccepted ) == OtaPalSuccess )
+    /* Staged OTA WP4 (F-OTA-020): this used to be the ONLY place a freshly
+     * booted image was marked valid - otaPal_SetPlatformImageState( Accepted )
+     * whenever a job document arrived while the running slot was still
+     * PENDING_VERIFY, i.e. only when AWS re-served the still-in-progress job
+     * after the restart. Since WP3 the job is terminal at staging, so that could
+     * never run for a staged image. Acceptance now has one owner, the host's
+     * first-boot gate (main/utils/ota_staging.c); this function no longer
+     * touches the running image's state and no longer returns
+     * OtaPalNewImageBooted. What it does keep is a refusal: a download while
+     * the running image is pending would erase the only rollback target. The
+     * agent never asks in that state (it neither issues StartNext nor acts on a
+     * document until the gate has accepted the image), so this is a backstop. */
     {
-        /* This demo just accepts the image. But if the application wants to
-         * verify any more details about it can be done here. Once verified,
-         * the success message can be sent to IoT core. */
-        return OtaPalNewImageBooted;
+        const esp_partition_t * running = esp_ota_get_running_partition();
+        esp_ota_img_states_t state = ESP_OTA_IMG_VALID;
+
+        if( ( running != NULL ) &&
+            ( esp_ota_get_state_partition( running, &state ) == ESP_OK ) &&
+            ( state == ESP_OTA_IMG_PENDING_VERIFY ) )
+        {
+            LogError( ( "Refusing to open the update slot: the running image is pending "
+                        "verification and the other slot is its rollback target" ) );
+            return OtaPalRxFileCreateFailed;
+        }
     }
 
     const esp_partition_t * update_partition = esp_ota_get_next_update_partition( NULL );
