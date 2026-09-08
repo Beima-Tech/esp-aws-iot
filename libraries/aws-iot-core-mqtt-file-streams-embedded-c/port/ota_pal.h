@@ -34,6 +34,7 @@
 #include "jobs.h"
 #include "job_parser.h"
 #include "esp_err.h"
+#include "esp_partition.h"
 
 #ifdef __cplusplus
     extern "C"
@@ -270,7 +271,13 @@ OtaPalStatus_t otaPal_ActivateNewImage( AfrOtaJobDocumentFields_t * const pFileC
  * @return The OTA PAL layer error code combined with the MCU specific error code. See OTA Agent
  * error codes information in ota.h.
  */
-OtaPalStatus_t otaPal_ResetDevice( AfrOtaJobDocumentFields_t * const pFileContext );
+/* F-OTA-023: otaPal_ActivateNewImage() STAGES the verified image (esp_ota_end +
+ * esp_ota_set_boot_partition) and returns; it never restarts. otaPal_ResetDevice()
+ * was deleted with it - no OTA path restarts the gateway (staged OTA plan). This
+ * returns the slot the bootloader was last pointed at, NULL when nothing is
+ * staged or after otaPal_CreateFileForRx() pointed the boot slot back at the
+ * running app for a newer job. */
+const esp_partition_t * otaPal_GetStagedPartition( void );
 
 /**
  * @brief Attempt to set the state of the OTA update image.

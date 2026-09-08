@@ -35,7 +35,6 @@
 #include "esp_log.h"
 #include "hal/wdt_hal.h"
 #include "esp_partition.h"
-#include "ppp_service_bridge.h"
 
 #if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL( 5, 1, 0 )
 #include "soc/rtc_cntl_reg.h"
@@ -55,7 +54,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define OTA_HALF_SECOND_DELAY    pdMS_TO_TICKS( 500UL )
 #define ECDSA_INTEGER_LEN        32
 
 /* Check configuration for memory constraints provided SPIRAM is not enabled */
@@ -94,6 +92,12 @@ typedef struct
 
 static esp_ota_context_t ota_ctx;
 static const char * TAG = "ota_pal";
+
+/* F-OTA-023: the slot otaPal_ActivateNewImage() last pointed the bootloader at,
+ * for the agent's candidate record. NULL until an image is staged, and NULL
+ * again once otaPal_CreateFileForRx() points the boot slot back at the running
+ * app for a newer job. */
+static const esp_partition_t * staged_partition = NULL;
 
 static char * codeSigningCertificatePEM = NULL;
 
@@ -216,6 +220,50 @@ static void _esp_ota_ctx_close( AfrOtaJobDocumentFields_t * pFileContext )
     ota_ctx.cur_ota = 0;
 }
 
+/* F-OTA-023: if the bootloader is pointed at a slot other than the running app
+ * (a staged candidate), point it back at the running app.
+ *
+ * Under CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE esp_ota_set_boot_partition() writes
+ * the new otadata entry as ESP_OTA_IMG_NEW (esp_rewrite_ota_data ->
+ * set_new_state_otadata), so after this the RUNNING app boots PENDING_VERIFY on
+ * its next start and is accepted by the first-boot gate (WP4) like any other
+ * image. That is the price of "a power cut mid-download boots the running app";
+ * the alternative - leaving the boot slot on the candidate while it is erased -
+ * boots nothing. Reads otadata (flash): callers run on the OTA task's
+ * internal-RAM stack. */
+static esp_err_t _esp_ota_unstage_boot_slot( void )
+{
+    const esp_partition_t * running = esp_ota_get_running_partition();
+    const esp_partition_t * boot = esp_ota_get_boot_partition();
+
+    if( ( running == NULL ) || ( boot == NULL ) )
+    {
+        LogError( ( "Cannot read the boot/running partition" ) );
+        return ESP_FAIL;
+    }
+
+    if( boot->address == running->address )
+    {
+        staged_partition = NULL;
+        return ESP_OK;
+    }
+
+    LogWarn( ( "A candidate is staged in the slot at 0x%" PRIx32 "; pointing the boot slot "
+               "back at the running app (0x%" PRIx32 ") before that slot is erased",
+               boot->address, running->address ) );
+
+    esp_err_t err = esp_ota_set_boot_partition( running );
+
+    if( err != ESP_OK )
+    {
+        LogError( ( "esp_ota_set_boot_partition(running) failed (%d); not erasing the staged slot", err ) );
+        return err;
+    }
+
+    staged_partition = NULL;
+    return ESP_OK;
+}
+
 /* Abort receiving the specified OTA update by closing the file. */
 OtaPalStatus_t otaPal_Abort( AfrOtaJobDocumentFields_t * const pFileContext )
 {
@@ -265,6 +313,16 @@ OtaPalStatus_t otaPal_CreateFileForRx( AfrOtaJobDocumentFields_t * const pFileCo
 
     LogInfo( ( "Writing to partition subtype %d at offset 0x%" PRIx32 "",
                update_partition->subtype, update_partition->address ) );
+
+    /* F-OTA-023: a newer job while a candidate is staged. The slot about to be
+     * erased may be the one the bootloader is pointed at; point it back at the
+     * running app FIRST, so a power cut anywhere in this download boots the
+     * image that is running now (the agent erased the candidate record before
+     * calling here). Only then erase. */
+    if( _esp_ota_unstage_boot_slot() != ESP_OK )
+    {
+        return OtaPalRxFileCreateFailed;
+    }
 
     esp_ota_handle_t update_handle;
     esp_err_t err = esp_ota_begin( update_partition, OTA_SIZE_UNKNOWN, &update_handle );
@@ -610,82 +668,75 @@ OtaPalStatus_t otaPal_CloseFile( AfrOtaJobDocumentFields_t * const pFileContext 
     return mainErr;
 }
 
-OtaPalStatus_t IRAM_ATTR otaPal_ResetDevice( AfrOtaJobDocumentFields_t * const pFileContext )
-{
-    ( void ) pFileContext;
-
-    /* Gracefully shut down 4G/PPP before OTA restart.
-     * If the modem is left in PPP DATA mode when esp_restart() fires, the next
-     * firmware image may lose AT access until the modem is explicitly recovered.
-     * Use the shared bridge so this OTA component does not depend on `main`. */
-    if( ppp_service_bridge_is_available() )
-    {
-        /* Attempt shutdown unconditionally when the bridge is present.
-         * The PPP "active" probe can transiently fail under state-lock contention,
-         * which would otherwise skip the only graceful modem cleanup before reboot. */
-        ESP_LOGI( TAG, "OTA restart: shutting down 4G/PPP to restore modem command mode" );
-        esp_err_t ppp_err = ppp_service_bridge_deinit( "OTA firmware activation restart" );
-        if( ppp_err == ESP_OK )
-        {
-            ESP_LOGI( TAG, "OTA restart: 4G/PPP shutdown completed before reboot" );
-            vTaskDelay( OTA_HALF_SECOND_DELAY );
-        }
-        else
-        {
-            ESP_LOGW( TAG,
-                      "OTA restart: 4G/PPP shutdown returned %s; continuing with startup self-heal fallback",
-                      esp_err_to_name( ppp_err ) );
-            vTaskDelay( pdMS_TO_TICKS( 2000UL ) );
-        }
-    }
-    else
-    {
-        ESP_LOGW( TAG, "OTA restart: PPP bridge unavailable, relying on modem startup self-heal only" );
-    }
-
-    /* Short delay for debug log output before reset. */
-    vTaskDelay( OTA_HALF_SECOND_DELAY );
-    esp_restart();
-    return OtaPalSuccess;
-}
-
+/* F-OTA-023 (staged OTA plan WP3): stage the verified image, do not activate it.
+ *
+ * This used to be esp_ota_end -> esp_ota_set_boot_partition -> otaPal_ResetDevice
+ * (PPP teardown + esp_restart) - the gateway restarted itself the moment a
+ * download finished, undrained and unannounced. Now it finalises the image and
+ * points the bootloader at it, and returns. Any later reset - the user's power
+ * cycle, the app's drained reboot command, a crash - boots the candidate in
+ * PENDING_VERIFY, where the first-boot gate (WP4) decides whether it stays.
+ * otaPal_ResetDevice() is DELETED, not stubbed: there is no restart on any OTA
+ * path, and a function that restarts must not exist for a later caller to find.
+ *
+ * On either failure the slot is erased, the context cleared and a PAL error
+ * returned so the agent reports the job FAILED and emits OTA_FAILED with the
+ * reason: OtaPalCommitFailed when esp_ota_end() rejects the image,
+ * OtaPalActivateFailed when the boot slot could not be switched. No esp_restart
+ * on any path. Runs on the OTA task (internal-RAM stack); every call here
+ * touches the flash. */
 OtaPalStatus_t otaPal_ActivateNewImage( AfrOtaJobDocumentFields_t * const pFileContext )
 {
     ( void ) pFileContext;
 
-    if( ota_ctx.cur_ota != NULL )
+    if( ( ota_ctx.cur_ota == NULL ) || ( ota_ctx.update_partition == NULL ) || ( ota_ctx.valid_image == false ) )
     {
-        /* F-OTA-018: esp_ota_end() unlinks and frees the entry on every path
-         * once it recognises the handle - success, validation failure and the
-         * "nothing was written" rejection alike - so the handle is spent from
-         * here on. Mark it before the branches below, both of which end in
-         * _esp_ota_ctx_clear() and would otherwise abort an already-freed
-         * handle. */
-        bool handle_was_valid = ota_ctx.update_handle_valid;
-        ota_ctx.update_handle_valid = false;
-
-        if( handle_was_valid && ( esp_ota_end( ota_ctx.update_handle ) != ESP_OK ) )
-        {
-            LogError( ( "esp_ota_end failed!" ) );
-            esp_partition_erase_range( ota_ctx.update_partition, 0, ota_ctx.update_partition->size );
-            otaPal_ResetDevice( pFileContext );
-        }
-
-        esp_err_t err = esp_ota_set_boot_partition( ota_ctx.update_partition );
-
-        if( err != ESP_OK )
-        {
-            LogError( ( "esp_ota_set_boot_partition failed (%d)!", err ) );
-            esp_partition_erase_range( ota_ctx.update_partition, 0, ota_ctx.update_partition->size );
-            _esp_ota_ctx_clear( &ota_ctx );
-        }
-
-        otaPal_ResetDevice( pFileContext );
+        LogError( ( "No verified image to stage" ) );
+        _esp_ota_ctx_clear( &ota_ctx );
+        return OtaPalActivateFailed;
     }
 
+    const esp_partition_t * candidate = ota_ctx.update_partition;
+
+    /* F-OTA-018: esp_ota_end() unlinks and frees the entry on every path once it
+     * recognises the handle - success, validation failure and the "nothing was
+     * written" rejection alike - so the handle is spent from here on. Mark it
+     * before the branches below, all of which end in _esp_ota_ctx_clear() and
+     * would otherwise abort an already-freed handle. */
+    bool handle_was_valid = ota_ctx.update_handle_valid;
+    ota_ctx.update_handle_valid = false;
+
+    if( ( handle_was_valid == false ) || ( esp_ota_end( ota_ctx.update_handle ) != ESP_OK ) )
+    {
+        LogError( ( "esp_ota_end failed; erasing the slot at 0x%" PRIx32 "", candidate->address ) );
+        esp_partition_erase_range( candidate, 0, candidate->size );
+        _esp_ota_ctx_clear( &ota_ctx );
+        return OtaPalCommitFailed;
+    }
+
+    esp_err_t err = esp_ota_set_boot_partition( candidate );
+
+    if( err != ESP_OK )
+    {
+        LogError( ( "esp_ota_set_boot_partition failed (%d); erasing the slot at 0x%" PRIx32 "",
+                    err, candidate->address ) );
+        esp_partition_erase_range( candidate, 0, candidate->size );
+        _esp_ota_ctx_clear( &ota_ctx );
+        return OtaPalActivateFailed;
+    }
+
+    staged_partition = candidate;
     _esp_ota_ctx_clear( &ota_ctx );
-    otaPal_ResetDevice( pFileContext );
+
+    LogInfo( ( "Image staged in the slot at 0x%" PRIx32 ": the next restart boots it. "
+               "No restart is issued here.", candidate->address ) );
+
     return OtaPalSuccess;
+}
+
+const esp_partition_t * otaPal_GetStagedPartition( void )
+{
+    return staged_partition;
 }
 
 /* Write a block of data to the specified file. */
